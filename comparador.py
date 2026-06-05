@@ -11,58 +11,67 @@ import holidays
 import pandas as pd
 
 VALIDATION_RULES: list[str] = [
-    "Duración en horas* = Duración ('## Horas' → ##.0; '## días' → ##×8 h antes de comparar)",
+    "Fecha inicio = Fecha de inicio planeada*",
+    "Duración en horas* = Duración (1 día = 10 h hábiles; '## Horas' → ##.0)",
+    "Vencimiento = Fecha inicio + Duración (días/horas hábiles CO; jornada 8:00–18:00)",
     "Vencimiento = Fecha de fin planeada*",
-    "Vencimiento = Fecha inicio + Duración (días hábiles CO; jornada 8:00–18:00; "
-    "1 día/8 h → siguiente día hábil misma hora; horas restantes dentro de jornada)",
-    "Tiempo utilizado = Fecha final − Fecha inicio (omitida si Fecha final vacía)",
+    "Fecha de fin planeada* = Fecha de inicio planeada* + Duración en horas* (horas hábiles)",
     "Tiempo utilizado (calendario)* = Fecha final − Fecha inicio (omitida si Fecha final vacía)",
-    "Tiempo total utilizado en días* = Tiempo transcurrido en días hábiles "
-    "(omitida si Fecha final vacía; Colombia lun–vie, festivos, 8:00–18:00)",
+    "Tiempo utilizado = Tiempo utilizado (hábil)* (comparación HH:MM; '1 día' = 10 h; "
+    "omitida si Fecha final vacía)",
+    "Tiempo total utilizado en días* = Tiempo utilizado (hábil)* / 10 "
+    "(omitida si Fecha final vacía)",
 ]
 
 DISPLAY_ID_COLUMNS = ["ID", "NOMBRE FLUJO", "CONSECUTIVO", "NOMBRE ACTIVIDAD"]
 
 COMPARISON_LABELS_ORDER: list[str] = [
+    "Fecha inicio = Inicio planeada*",
     "Duración en horas* = Duración",
-    "Vencimiento = Fecha fin planeada*",
     "Vencimiento = Inicio + Duración",
-    "Tiempo utilizado = Fin − Inicio",
+    "Vencimiento = Fecha fin planeada*",
+    "Fin planeada* = Inicio planeada* + Duración*",
     "Tiempo calendario* = Fin − Inicio",
-    "Días hábiles* = Transcurrido (hábil)",
+    "Tiempo utilizado = Hábil* (HH:MM)",
+    "Días totales* = Hábil* / 10",
 ]
 
 RULES_REQUIRING_FECHA_FINAL: list[tuple[str, str, str]] = [
-    ("Tiempo utilizado = Fin − Inicio", "TIEMPO UTILIZADO", "FECHA FINAL − FECHA INICIO"),
     (
         "Tiempo calendario* = Fin − Inicio",
         "TIEMPO UTILIZADO (CALENDARIO)*",
         "FECHA FINAL − FECHA INICIO",
     ),
     (
-        "Días hábiles* = Transcurrido (hábil)",
+        "Tiempo utilizado = Hábil* (HH:MM)",
+        "TIEMPO UTILIZADO",
+        "TIEMPO UTILIZADO (HÁBIL)*",
+    ),
+    (
+        "Días totales* = Hábil* / 10",
         "TIEMPO TOTAL UTILIZADO EN DÍAS*",
-        "TIEMPO TRANSCURRIDO",
+        "TIEMPO UTILIZADO (HÁBIL)* / 10",
     ),
 ]
 
 REQUIRED_COLUMNS = [
     "FECHA INICIO",
+    "FECHA DE INICIO PLANEADA*",
     "DURACIÓN",
+    "DURACIÓN EN HORAS*",
     "FECHA FINAL",
     "VENCIMIENTO",
-    "TIEMPO UTILIZADO",
-    "TIEMPO TRANSCURRIDO",
     "FECHA DE FIN PLANEADA*",
-    "DURACIÓN EN HORAS*",
+    "TIEMPO UTILIZADO",
+    "TIEMPO UTILIZADO (HÁBIL)*",
     "TIEMPO UTILIZADO (CALENDARIO)*",
     "TIEMPO TOTAL UTILIZADO EN DÍAS*",
 ]
 
 BUSINESS_START = time(8, 0)
 BUSINESS_END = time(18, 0)
-HOURS_PER_BUSINESS_DAY = 10.0  # ventana 8:00–18:00
-HOURS_PER_DURATION_DAY = 8.0  # 1 día en columna Duración = 8 h hábiles
+HOURS_PER_BUSINESS_DAY = 10.0  # ventana 8:00–18:00 = 10 h hábiles
+HOURS_PER_DURATION_DAY = 10.0  # 1 día en columna Duración = 10 h hábiles
 
 
 def normalize_header(name: str) -> str:
@@ -116,7 +125,7 @@ def is_business_day(day: datetime.date, co_holidays: holidays.HolidayBase) -> bo
 
 
 def duration_to_hours(val: Any) -> float | None:
-    """'## Horas' → ##.0; '## días' → ## × 8 horas hábiles."""
+    """'## Horas' → ##.0; '## días' → ## × 10 horas hábiles (1 día = 10 h)."""
     if _is_empty(val):
         return None
     if isinstance(val, (int, float)) and not pd.isna(val):
@@ -162,7 +171,7 @@ def duration_to_components(dur_val: Any) -> tuple[int, float] | None:
     """
     Descompone Duración en (días hábiles completos, horas hábiles restantes).
     - 'N días' → (N, 0)
-    - 'H Horas' → (H//8, H%8)
+    - 'H Horas' → (H//10, H%10)  (1 día = 10 h hábiles)
     """
     if _is_empty(dur_val):
         return None
@@ -331,46 +340,48 @@ def format_minutes_as_span(minutes: float) -> str:
     return " ".join(parts)
 
 
+def parse_business_time_to_minutes(val: Any) -> float | None:
+    """
+    Parsea tiempo hábil. Soporta dos formatos:
+    - 'X días Y horas Z minutos'  → 1 día = 10 h hábiles
+    - 'HH:MM:SS' o 'HH:MM'        → HH horas + MM minutos (segundos truncados)
+    """
+    if _is_empty(val):
+        return None
+    if isinstance(val, (int, float)) and not pd.isna(val):
+        return float(val) * 60  # se asume valor en horas
+
+    s = str(val).strip().lower()
+
+    m = re.match(r"^(\d+):(\d{2})(?::(\d{2}))?$", s)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        return h * 60 + mi  # segundos ignorados
+
+    days = hours = minutes = 0.0
+    for part, unit in re.findall(
+        r"(\d+)\s*(días|dias|día|dia|horas|hora|h|minutos|minuto|min)", s
+    ):
+        n = float(part)
+        if unit.startswith("d"):
+            days = n
+        elif unit.startswith("h") or unit == "hora":
+            hours = n
+        else:
+            minutes = n
+    if days or hours or minutes:
+        return days * HOURS_PER_BUSINESS_DAY * 60 + hours * 60 + minutes
+    return None
+
+
+def format_minutes_as_hhmm(minutes: float) -> str:
+    total_min = int(minutes)
+    h, mi = divmod(total_min, 60)
+    return f"{h:02d}:{mi:02d}"
+
+
 def calendar_minutes_between(inicio: datetime, fin: datetime) -> float:
     return max(0.0, (fin - inicio).total_seconds() / 60)
-
-
-def business_seconds_between(start: datetime, end: datetime) -> float:
-    if end <= start:
-        return 0.0
-
-    co_holidays = _holiday_set(start, end)
-    total = 0.0
-    day = start.date()
-    end_day = end.date()
-
-    while day <= end_day:
-        if is_business_day(day, co_holidays):
-            day_start = datetime.combine(day, BUSINESS_START)
-            day_end = datetime.combine(day, BUSINESS_END)
-            window_start = max(start, day_start)
-            window_end = min(end, day_end)
-            if window_start < window_end:
-                total += (window_end - window_start).total_seconds()
-        day += timedelta(days=1)
-
-    return total
-
-
-def business_days_between(start: datetime, end: datetime) -> float:
-    return business_seconds_between(start, end) / (HOURS_PER_BUSINESS_DAY * 3600)
-
-
-def transcurrido_to_business_days(
-    transcurrido: Any, inicio: datetime | None, fin: datetime | None
-) -> float | None:
-    if inicio is not None and fin is not None:
-        return business_days_between(inicio, fin)
-
-    cal_min = parse_time_span_to_minutes(transcurrido)
-    if cal_min is None:
-        return None
-    return (cal_min / 60) / HOURS_PER_BUSINESS_DAY
 
 
 def _compare_minutes(
@@ -455,6 +466,21 @@ def _result_omitida(
     )
 
 
+def _compare_datetimes(
+    dt_a: datetime | None,
+    dt_b: datetime | None,
+    raw_a: Any,
+    raw_b: Any,
+    tol_seconds: int = 2,
+) -> tuple[bool, str]:
+    if dt_a and dt_b:
+        diff = abs((dt_a - dt_b).total_seconds())
+        ok = diff <= tol_seconds
+        return ok, "Coinciden" if ok else f"Δ {int(diff)}s: '{raw_a}' vs '{raw_b}'"
+    ok = str(raw_a).strip() == str(raw_b).strip()
+    return ok, "Coinciden (texto)" if ok else f"'{raw_a}' vs '{raw_b}'"
+
+
 def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     base = {col: row.get(col, "") for col in DISPLAY_ID_COLUMNS if col in row.index}
@@ -474,10 +500,33 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
             )
         )
 
-    # --- 1. Duración en horas* = Duración ---
-    label1 = "Duración en horas* = Duración"
+    # --- 1. FECHA INICIO = FECHA DE INICIO PLANEADA* ---
+    label1 = "Fecha inicio = Inicio planeada*"
+    if "FECHA INICIO" not in row.index or "FECHA DE INICIO PLANEADA*" not in row.index:
+        missing(label1, ["FECHA INICIO", "FECHA DE INICIO PLANEADA*"])
+    else:
+        ini = parse_datetime(row["FECHA INICIO"])
+        ini_pl = parse_datetime(row["FECHA DE INICIO PLANEADA*"])
+        ok, det = _compare_datetimes(
+            ini, ini_pl, row["FECHA INICIO"], row["FECHA DE INICIO PLANEADA*"]
+        )
+        results.append(
+            _result(
+                base,
+                comparacion=label1,
+                columna_esperada="FECHA INICIO",
+                columna_referencia="FECHA DE INICIO PLANEADA*",
+                valor_esperado=row["FECHA INICIO"],
+                valor_referencia=row["FECHA DE INICIO PLANEADA*"],
+                ok=ok,
+                detalle=det,
+            )
+        )
+
+    # --- 2. Duración en horas* = Duración (1 día = 10 h) ---
+    label2 = "Duración en horas* = Duración"
     if "DURACIÓN EN HORAS*" not in row.index or "DURACIÓN" not in row.index:
-        missing(label1, ["DURACIÓN EN HORAS*", "DURACIÓN"])
+        missing(label2, ["DURACIÓN EN HORAS*", "DURACIÓN"])
     else:
         dur_h = duration_to_hours(row["DURACIÓN"])
         star_h = parse_duration_star_hours(row["DURACIÓN EN HORAS*"])
@@ -494,7 +543,7 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
         results.append(
             _result(
                 base,
-                comparacion=label1,
+                comparacion=label2,
                 columna_esperada="DURACIÓN EN HORAS*",
                 columna_referencia="DURACIÓN",
                 valor_esperado=row["DURACIÓN EN HORAS*"],
@@ -505,38 +554,7 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
             )
         )
 
-    # --- 2. Vencimiento = Fecha de fin planeada* ---
-    label2 = "Vencimiento = Fecha fin planeada*"
-    if "VENCIMIENTO" not in row.index or "FECHA DE FIN PLANEADA*" not in row.index:
-        missing(label2, ["VENCIMIENTO", "FECHA DE FIN PLANEADA*"])
-    else:
-        v_dt = parse_datetime(row["VENCIMIENTO"])
-        f_dt = parse_datetime(row["FECHA DE FIN PLANEADA*"])
-        if v_dt and f_dt:
-            diff = abs((v_dt - f_dt).total_seconds())
-            ok = diff <= 2
-            det = (
-                "Coinciden"
-                if ok
-                else f"Δ {int(diff)}s: '{row['VENCIMIENTO']}' vs '{row['FECHA DE FIN PLANEADA*']}'"
-            )
-        else:
-            ok = str(row["VENCIMIENTO"]).strip() == str(row["FECHA DE FIN PLANEADA*"]).strip()
-            det = "Coinciden (texto)" if ok else f"'{row['VENCIMIENTO']}' vs '{row['FECHA DE FIN PLANEADA*']}'"
-        results.append(
-            _result(
-                base,
-                comparacion=label2,
-                columna_esperada="VENCIMIENTO",
-                columna_referencia="FECHA DE FIN PLANEADA*",
-                valor_esperado=row["VENCIMIENTO"],
-                valor_referencia=row["FECHA DE FIN PLANEADA*"],
-                ok=ok,
-                detalle=det,
-            )
-        )
-
-    # --- 3. Vencimiento = Fecha inicio + Duración (días hábiles) ---
+    # --- 3. Vencimiento = Fecha inicio + Duración (días/horas hábiles) ---
     label3 = "Vencimiento = Inicio + Duración"
     if "VENCIMIENTO" not in row.index or "FECHA INICIO" not in row.index or "DURACIÓN" not in row.index:
         missing(label3, ["VENCIMIENTO", "FECHA INICIO", "DURACIÓN"])
@@ -578,6 +596,75 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
             )
         )
 
+    # --- 4. Vencimiento = Fecha de fin planeada* ---
+    label4 = "Vencimiento = Fecha fin planeada*"
+    if "VENCIMIENTO" not in row.index or "FECHA DE FIN PLANEADA*" not in row.index:
+        missing(label4, ["VENCIMIENTO", "FECHA DE FIN PLANEADA*"])
+    else:
+        v_dt = parse_datetime(row["VENCIMIENTO"])
+        f_dt = parse_datetime(row["FECHA DE FIN PLANEADA*"])
+        ok, det = _compare_datetimes(
+            v_dt, f_dt, row["VENCIMIENTO"], row["FECHA DE FIN PLANEADA*"]
+        )
+        results.append(
+            _result(
+                base,
+                comparacion=label4,
+                columna_esperada="VENCIMIENTO",
+                columna_referencia="FECHA DE FIN PLANEADA*",
+                valor_esperado=row["VENCIMIENTO"],
+                valor_referencia=row["FECHA DE FIN PLANEADA*"],
+                ok=ok,
+                detalle=det,
+            )
+        )
+
+    # --- 5. Fecha fin planeada* = Fecha inicio planeada* + Duración en horas* ---
+    label5 = "Fin planeada* = Inicio planeada* + Duración*"
+    needed_cols = ["FECHA DE FIN PLANEADA*", "FECHA DE INICIO PLANEADA*", "DURACIÓN EN HORAS*"]
+    if any(c not in row.index for c in needed_cols):
+        missing(label5, needed_cols)
+    else:
+        ini_pl = parse_datetime(row["FECHA DE INICIO PLANEADA*"])
+        fin_pl = parse_datetime(row["FECHA DE FIN PLANEADA*"])
+        dur_h_star = parse_duration_star_hours(row["DURACIÓN EN HORAS*"])
+        if ini_pl is not None and dur_h_star is not None:
+            calc_dt = add_business_hours(ini_pl, dur_h_star) if dur_h_star > 0 else ini_pl
+            calc_str = calc_dt.strftime("%Y-%m-%d %H:%M:%S")
+            if fin_pl is not None:
+                diff = abs((calc_dt - fin_pl).total_seconds())
+                ok = diff <= 60
+                det = (
+                    "Coinciden"
+                    if ok
+                    else (
+                        f"Inicio planeada* '{row['FECHA DE INICIO PLANEADA*']}' "
+                        f"+ {dur_h_star:g} h hábiles → {calc_str} vs "
+                        f"Fin planeada* '{row['FECHA DE FIN PLANEADA*']}' (Δ {int(diff)}s)"
+                    )
+                )
+            else:
+                ok = False
+                det = f"Fecha de fin planeada* inválida: '{row['FECHA DE FIN PLANEADA*']}'"
+        else:
+            ok = False
+            calc_str = ""
+            det = "No se pudo calcular (Inicio planeada* o Duración en horas* inválidos)"
+        results.append(
+            _result(
+                base,
+                comparacion=label5,
+                columna_esperada="FECHA DE FIN PLANEADA*",
+                columna_referencia="FECHA DE INICIO PLANEADA* + DURACIÓN EN HORAS*",
+                valor_esperado=row["FECHA DE FIN PLANEADA*"],
+                valor_referencia=row["FECHA DE INICIO PLANEADA*"],
+                valor_calculado=calc_str,
+                ok=ok,
+                detalle=det,
+            )
+        )
+
+    # Reglas 6-8 dependen de FECHA FINAL
     fin_vacia = _is_empty(row.get("FECHA FINAL"))
     if fin_vacia:
         for comparacion, col_a, col_ref in RULES_REQUIRING_FECHA_FINAL:
@@ -590,37 +677,10 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
         )
         cal_span = format_minutes_as_span(cal_min) if cal_min is not None else ""
 
-        # --- 4. Tiempo utilizado = Fin − Inicio ---
-        label4 = "Tiempo utilizado = Fin − Inicio"
-        if "TIEMPO UTILIZADO" not in row.index:
-            missing(label4, ["TIEMPO UTILIZADO"])
-        else:
-            uso_min = parse_time_span_to_minutes(row["TIEMPO UTILIZADO"])
-            ok, det = _compare_minutes(
-                uso_min,
-                cal_min,
-                "Tiempo utilizado",
-                str(row["TIEMPO UTILIZADO"]),
-                cal_span,
-            )
-            results.append(
-                _result(
-                    base,
-                    comparacion=label4,
-                    columna_esperada="TIEMPO UTILIZADO",
-                    columna_referencia="FECHA FINAL − FECHA INICIO",
-                    valor_esperado=row["TIEMPO UTILIZADO"],
-                    valor_referencia=cal_span,
-                    valor_calculado=cal_span,
-                    ok=ok,
-                    detalle=det,
-                )
-            )
-
-        # --- 5. Tiempo calendario* = Fin − Inicio ---
-        label5 = "Tiempo calendario* = Fin − Inicio"
+        # --- 6. Tiempo calendario* = Fin − Inicio ---
+        label6 = "Tiempo calendario* = Fin − Inicio"
         if "TIEMPO UTILIZADO (CALENDARIO)*" not in row.index:
-            missing(label5, ["TIEMPO UTILIZADO (CALENDARIO)*"])
+            missing(label6, ["TIEMPO UTILIZADO (CALENDARIO)*"])
         else:
             star_min = parse_time_span_to_minutes(row["TIEMPO UTILIZADO (CALENDARIO)*"])
             ok, det = _compare_minutes(
@@ -633,7 +693,7 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
             results.append(
                 _result(
                     base,
-                    comparacion=label5,
+                    comparacion=label6,
                     columna_esperada="TIEMPO UTILIZADO (CALENDARIO)*",
                     columna_referencia="FECHA FINAL − FECHA INICIO",
                     valor_esperado=row["TIEMPO UTILIZADO (CALENDARIO)*"],
@@ -644,29 +704,85 @@ def compare_row(row: pd.Series, idx: int) -> list[dict[str, Any]]:
                 )
             )
 
-        # --- 6. Días hábiles* = Transcurrido (hábil) ---
-        label6 = "Días hábiles* = Transcurrido (hábil)"
-        if "TIEMPO TOTAL UTILIZADO EN DÍAS*" not in row.index:
-            missing(label6, ["TIEMPO TOTAL UTILIZADO EN DÍAS*"])
+        # --- 7. Tiempo utilizado = Tiempo utilizado (hábil)* (HH:MM) ---
+        label7 = "Tiempo utilizado = Hábil* (HH:MM)"
+        if "TIEMPO UTILIZADO" not in row.index or "TIEMPO UTILIZADO (HÁBIL)*" not in row.index:
+            missing(label7, ["TIEMPO UTILIZADO", "TIEMPO UTILIZADO (HÁBIL)*"])
         else:
-            star_days = parse_duration_star_hours(row["TIEMPO TOTAL UTILIZADO EN DÍAS*"])
-            ref_days = transcurrido_to_business_days(
-                row.get("TIEMPO TRANSCURRIDO"), inicio_dt, fin_dt
-            )
-            ok, det = _compare_numeric(star_days, ref_days, 0.05, "días hábiles")
-            if star_days is None:
-                ok, det = False, f"Días* no comparable: '{row['TIEMPO TOTAL UTILIZADO EN DÍAS*']}'"
-            elif ref_days is None:
-                ok, det = False, "No se pudo calcular días hábiles de referencia"
+            uso_min = parse_business_time_to_minutes(row["TIEMPO UTILIZADO"])
+            habil_min = parse_business_time_to_minutes(row["TIEMPO UTILIZADO (HÁBIL)*"])
+            if uso_min is None or habil_min is None:
+                ok = False
+                det = (
+                    f"No comparable: '{row['TIEMPO UTILIZADO']}' vs "
+                    f"'{row['TIEMPO UTILIZADO (HÁBIL)*']}'"
+                )
+                calc_str = ""
+            else:
+                uso_hhmm = int(uso_min)
+                habil_hhmm = int(habil_min)
+                ok = uso_hhmm == habil_hhmm
+                uso_fmt = format_minutes_as_hhmm(uso_hhmm)
+                habil_fmt = format_minutes_as_hhmm(habil_hhmm)
+                calc_str = habil_fmt
+                det = (
+                    "Coinciden (HH:MM)"
+                    if ok
+                    else f"{uso_fmt} vs {habil_fmt} (Δ {abs(uso_hhmm - habil_hhmm)} min)"
+                )
             results.append(
                 _result(
                     base,
-                    comparacion=label6,
+                    comparacion=label7,
+                    columna_esperada="TIEMPO UTILIZADO",
+                    columna_referencia="TIEMPO UTILIZADO (HÁBIL)*",
+                    valor_esperado=row["TIEMPO UTILIZADO"],
+                    valor_referencia=row["TIEMPO UTILIZADO (HÁBIL)*"],
+                    valor_calculado=calc_str,
+                    ok=ok,
+                    detalle=det,
+                )
+            )
+
+        # --- 8. Tiempo total utilizado en días* = Hábil* / 10 ---
+        label8 = "Días totales* = Hábil* / 10"
+        if "TIEMPO TOTAL UTILIZADO EN DÍAS*" not in row.index or "TIEMPO UTILIZADO (HÁBIL)*" not in row.index:
+            missing(label8, ["TIEMPO TOTAL UTILIZADO EN DÍAS*", "TIEMPO UTILIZADO (HÁBIL)*"])
+        else:
+            habil_min = parse_business_time_to_minutes(row["TIEMPO UTILIZADO (HÁBIL)*"])
+            star_days = parse_duration_star_hours(row["TIEMPO TOTAL UTILIZADO EN DÍAS*"])
+            if habil_min is None:
+                ok, det, calc_str = False, (
+                    f"Tiempo hábil* no parseable: '{row['TIEMPO UTILIZADO (HÁBIL)*']}'"
+                ), ""
+            elif star_days is None:
+                ok, det, calc_str = False, (
+                    f"Días totales* no parseable: '{row['TIEMPO TOTAL UTILIZADO EN DÍAS*']}'"
+                ), ""
+            else:
+                habil_hours = habil_min / 60
+                expected_days = habil_hours / HOURS_PER_BUSINESS_DAY
+                ok = abs(star_days - expected_days) <= 0.05
+                calc_str = f"{expected_days:.4f}"
+                det = (
+                    "Coinciden"
+                    if ok
+                    else (
+                        f"Esperado {expected_days:.4f} días "
+                        f"(= {habil_hours:.2f} h / {HOURS_PER_BUSINESS_DAY:g}) vs "
+                        f"{star_days:.4f} días "
+                        f"(Δ {abs(star_days - expected_days):.4f})"
+                    )
+                )
+            results.append(
+                _result(
+                    base,
+                    comparacion=label8,
                     columna_esperada="TIEMPO TOTAL UTILIZADO EN DÍAS*",
-                    columna_referencia="TIEMPO TRANSCURRIDO (hábil)",
+                    columna_referencia="TIEMPO UTILIZADO (HÁBIL)* / 10",
                     valor_esperado=row["TIEMPO TOTAL UTILIZADO EN DÍAS*"],
-                    valor_referencia=row.get("TIEMPO TRANSCURRIDO"),
-                    valor_calculado=f"{ref_days:.4f}" if ref_days is not None else "",
+                    valor_referencia=row["TIEMPO UTILIZADO (HÁBIL)*"],
+                    valor_calculado=calc_str,
                     ok=ok,
                     detalle=det,
                 )
