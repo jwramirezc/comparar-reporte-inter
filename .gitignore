@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.streamlit/
+
+# macOS
+.DS_Store
+
+# CSVs de prueba — no se versionan datos
+*.csv
+
+# Editores
+.vscode/
+.idea/
+
